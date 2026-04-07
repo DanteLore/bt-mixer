@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la /c/esp/v5.5.3/esp-idf/components/bt/host/bluedroid/api/include/api/*legacy*)",
+      "Bash(xargs grep:*)",
+      "Bash(grep -r \"CONFIG_BT_A2DP\" /c/esp/v5.5.3/esp-idf/components/bt/Kconfig*)",
+      "Bash(grep -r \"sink.*source\\\\|source.*sink\\\\|simultaneously\" /c/esp/v5.5.3/esp-idf/examples/bluetooth/bluedroid/classic_bt/a2dp_source/*.md)"
+    ]
+  }
+}
