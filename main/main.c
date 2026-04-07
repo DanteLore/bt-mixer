@@ -74,9 +74,11 @@ void app_main(void)
     bt_audio_init();
     bt_audio_set_volume(volume);
 
-    int last_drawn_volume = -1;
-    int last_drawn_level  = -1;
-    int64_t last_draw_us  = 0;
+    int last_drawn_volume  = -1;
+    int last_drawn_level   = -1;
+    int64_t last_draw_us   = 0;
+    int     saved_volume   = volume;
+    int64_t volume_changed_us = 0;  // time of last volume change
 
     // Initial draw
     char buf[16];
@@ -105,7 +107,7 @@ void app_main(void)
 
             if (volume != last_drawn_volume) {
                 bt_audio_set_volume(volume);
-                save_volume(volume);
+                volume_changed_us = now;
                 snprintf(buf, sizeof(buf), "VOL: %3d%%", volume);
                 st7789_draw_string(8, VOL_TEXT_Y, buf, COLOR_WHITE, COLOR_BLACK);
                 update_bar(VOL_BAR_Y, volume, last_drawn_volume);
@@ -117,6 +119,13 @@ void app_main(void)
                 st7789_draw_string(8, SIG_TEXT_Y, buf, COLOR_WHITE, COLOR_BLACK);
                 update_bar(SIG_BAR_Y, level, last_drawn_level);
                 last_drawn_level = level;
+            }
+
+            // Save to NVS 2 seconds after the knob stops moving
+            if (volume != saved_volume && volume_changed_us > 0
+                    && now - volume_changed_us >= 2000000) {
+                save_volume(volume);
+                saved_volume = volume;
             }
 
             last_draw_us = now;
