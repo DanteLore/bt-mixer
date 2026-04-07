@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
@@ -23,10 +24,15 @@
 #define NVS_NAMESPACE  "bt-mixer"
 #define NVS_KEY_VOLUME "volume"
 
+// Thresholds for SIG bar colour (as bar pixel width out of BAR_W)
+#define SIG_GREEN_PX  ((BAR_W * 75) / 100)   // 0–75%
+#define SIG_AMBER_PX  ((BAR_W * 90) / 100)   // 75–90%
+                                               // 90–100% = red
+
 static int load_volume(void)
 {
     nvs_handle_t h;
-    int32_t v = 50;
+    int32_t v = 75;   // ~0dB unity gain on first boot
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
         nvs_get_i32(h, NVS_KEY_VOLUME, &v);
         nvs_close(h);
@@ -44,16 +50,72 @@ static void save_volume(int volume)
     }
 }
 
-// Paints only the slice of a bar that changed since last draw.
-static void update_bar(int y, int value, int prev_value)
+static float volume_to_db(int v)
+{
+    if (v == 0) return -99.0f;
+    float dB = -40.0f + v * 0.468f;
+    return dB;
+}
+
+static void format_vol_label(char *buf, int volume)
+{
+    if (volume == 0) {
+        snprintf(buf, 16, "VOL:    MUTE");
+    } else {
+        float dB = volume_to_db(volume);
+        snprintf(buf, 16, "VOL: %+5.1fdB", dB);
+    }
+}
+
+static void format_sig_label(char *buf, int level)
+{
+    if (level == 0) {
+        snprintf(buf, 16, "SIG: NO SIGNAL");
+    } else {
+        float dBFS = level / 2.5f - 40.0f;
+        snprintf(buf, 16, "SIG: %+5.1fdB  ", dBFS);
+    }
+}
+
+// VOL bar: simple green, differential update
+static void update_vol_bar(int value, int prev_value)
 {
     int fill_w      = (BAR_W * value)      / 100;
     int prev_fill_w = (BAR_W * prev_value) / 100;
 
     if (fill_w > prev_fill_w)
-        st7789_fill_rect(BAR_X + prev_fill_w, y, fill_w - prev_fill_w, BAR_H, COLOR_GREEN);
+        st7789_fill_rect(BAR_X + prev_fill_w, VOL_BAR_Y, fill_w - prev_fill_w, BAR_H, COLOR_GREEN);
     else if (fill_w < prev_fill_w)
-        st7789_fill_rect(BAR_X + fill_w, y, prev_fill_w - fill_w, BAR_H, RGB565(40, 40, 40));
+        st7789_fill_rect(BAR_X + fill_w, VOL_BAR_Y, prev_fill_w - fill_w, BAR_H, RGB565(40, 40, 40));
+}
+
+// SIG bar: green/amber/red zones. Redraws the changed region with correct colour.
+static void update_sig_bar(int value, int prev_value)
+{
+    int fill_w      = (BAR_W * value)      / 100;
+    int prev_fill_w = (BAR_W * prev_value) / 100;
+
+    if (fill_w > prev_fill_w) {
+        // Growing — draw new slice, possibly spanning multiple colour zones
+        for (int x = prev_fill_w; x < fill_w; ) {
+            int end;
+            uint16_t colour;
+            if (x < SIG_GREEN_PX) {
+                end = SIG_GREEN_PX < fill_w ? SIG_GREEN_PX : fill_w;
+                colour = COLOR_GREEN;
+            } else if (x < SIG_AMBER_PX) {
+                end = SIG_AMBER_PX < fill_w ? SIG_AMBER_PX : fill_w;
+                colour = COLOR_YELLOW;
+            } else {
+                end = fill_w;
+                colour = COLOR_RED;
+            }
+            st7789_fill_rect(BAR_X + x, SIG_BAR_Y, end - x, BAR_H, colour);
+            x = end;
+        }
+    } else if (fill_w < prev_fill_w) {
+        st7789_fill_rect(BAR_X + fill_w, SIG_BAR_Y, prev_fill_w - fill_w, BAR_H, RGB565(40, 40, 40));
+    }
 }
 
 void app_main(void)
@@ -78,16 +140,17 @@ void app_main(void)
     int last_drawn_level   = -1;
     int64_t last_draw_us   = 0;
     int     saved_volume   = volume;
-    int64_t volume_changed_us = 0;  // time of last volume change
+    int64_t volume_changed_us = 0;
 
     // Initial draw
     char buf[16];
-    snprintf(buf, sizeof(buf), "VOL: %3d%%", volume);
+    format_vol_label(buf, volume);
     st7789_draw_string(8, VOL_TEXT_Y, buf, COLOR_WHITE, COLOR_BLACK);
     st7789_fill_rect(BAR_X, VOL_BAR_Y, BAR_W, BAR_H, RGB565(40, 40, 40));
-    update_bar(VOL_BAR_Y, volume, 0);
+    update_vol_bar(volume, 0);
 
-    st7789_draw_string(8, SIG_TEXT_Y, "SIG:   0%", COLOR_WHITE, COLOR_BLACK);
+    format_sig_label(buf, 0);
+    st7789_draw_string(8, SIG_TEXT_Y, buf, COLOR_WHITE, COLOR_BLACK);
     st7789_fill_rect(BAR_X, SIG_BAR_Y, BAR_W, BAR_H, RGB565(40, 40, 40));
 
     last_drawn_volume = volume;
@@ -108,16 +171,16 @@ void app_main(void)
             if (volume != last_drawn_volume) {
                 bt_audio_set_volume(volume);
                 volume_changed_us = now;
-                snprintf(buf, sizeof(buf), "VOL: %3d%%", volume);
+                format_vol_label(buf, volume);
                 st7789_draw_string(8, VOL_TEXT_Y, buf, COLOR_WHITE, COLOR_BLACK);
-                update_bar(VOL_BAR_Y, volume, last_drawn_volume);
+                update_vol_bar(volume, last_drawn_volume);
                 last_drawn_volume = volume;
             }
 
             if (level != last_drawn_level) {
-                snprintf(buf, sizeof(buf), "SIG: %3d%%", level);
+                format_sig_label(buf, level);
                 st7789_draw_string(8, SIG_TEXT_Y, buf, COLOR_WHITE, COLOR_BLACK);
-                update_bar(SIG_BAR_Y, level, last_drawn_level);
+                update_sig_bar(level, last_drawn_level);
                 last_drawn_level = level;
             }
 

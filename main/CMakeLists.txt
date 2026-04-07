@@ -3,3 +3,5 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES nvs_flash esp_driver_spi esp_driver_gpio esp_timer bt
 )
+
+target_link_libraries(${COMPONENT_LIB} PRIVATE m)

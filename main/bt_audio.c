@@ -10,14 +10,26 @@
 
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <math.h>
 
 static const char *TAG = "bt_audio";
 static atomic_int audio_level;
-static atomic_int volume_pct;
+static atomic_int gain_fp;   // fixed-point: 1000 = 1.0x gain
 
-void bt_audio_set_volume(int volume)
+void bt_audio_set_volume(int v)
 {
-    atomic_store(&volume_pct, volume);
+    // Map 0-100 → -40dB to +12dB logarithmically.
+    // v=0  → silence
+    // v=77 → 0dB (unity gain, 1.0x)
+    // v=100 → +12dB (~4x boost, for quiet sources)
+    float gain;
+    if (v == 0) {
+        gain = 0.0f;
+    } else {
+        float dB = -40.0f + v * 0.468f;  // 100 → +6.8dB, 0 → -40dB
+        gain = powf(10.0f, dB / 20.0f);
+    }
+    atomic_store(&gain_fp, (int)(gain * 1000.0f));
 }
 
 static void data_cb(const uint8_t *buf, uint32_t len)
@@ -25,15 +37,27 @@ static void data_cb(const uint8_t *buf, uint32_t len)
     // Decoded PCM: signed 16-bit stereo
     const int16_t *samples = (const int16_t *)buf;
     int n   = len / 2;
-    int vol = atomic_load(&volume_pct);
+    int gfp = atomic_load(&gain_fp);
 
     int32_t peak = 0;
     for (int i = 0; i < n; i++) {
-        int32_t s = abs((int32_t)samples[i] * vol / 100);
+        int32_t s = (int32_t)samples[i] * gfp / 1000;
+        if (s >  32767) s =  32767;
+        if (s < -32767) s = -32767;
+        if (s < 0) s = -s;
         if (s > peak) peak = s;
     }
 
-    int new_level = (int)((peak * 100) / 32767);
+    int new_level;
+    if (peak == 0) {
+        new_level = 0;
+    } else {
+        // Map 0dBFS (peak=32767) → 100, -40dBFS → 0
+        float dBFS = 20.0f * log10f((float)peak / 32767.0f);
+        new_level = (int)((dBFS + 40.0f) * 2.5f);
+        if (new_level < 0)   new_level = 0;
+        if (new_level > 100) new_level = 100;
+    }
     int current   = atomic_load(&audio_level);
     // Fast attack, slow decay
     int smoothed  = (new_level > current) ? new_level : (current * 7 + new_level) / 8;
@@ -70,7 +94,7 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
 void bt_audio_init(void)
 {
     atomic_init(&audio_level, 0);
-    atomic_init(&volume_pct, 100);
+    atomic_init(&gain_fp, 1000);   // unity until bt_audio_set_volume() is called
 
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     bt_cfg.mode = ESP_BT_MODE_CLASSIC_BT;

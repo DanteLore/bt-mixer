@@ -3,6 +3,15 @@
 #include "esp_attr.h"
 #include <stdatomic.h>
 
+// CPU runs at 240MHz — cycles per millisecond
+#define CYCLES_PER_MS  240000
+
+static inline uint32_t IRAM_ATTR get_ccount(void) {
+    uint32_t c;
+    __asm__ __volatile__("rsr %0, ccount" : "=a"(c));
+    return c;
+}
+
 #define PIN_CLK 33
 #define PIN_DT  27
 #define PIN_SW  14
@@ -17,7 +26,9 @@ static const int8_t enc_table[16] = {
 };
 
 static atomic_int delta;
-static volatile uint8_t last_state;
+static volatile uint8_t  last_state;
+static volatile int8_t   accumulated;
+static volatile uint32_t last_detent_cycles;
 
 static void IRAM_ATTR encoder_isr(void *arg)
 {
@@ -25,8 +36,26 @@ static void IRAM_ATTR encoder_isr(void *arg)
     if (curr == last_state) return;
 
     int change = enc_table[(last_state << 2) | curr];
-    if (change != 0)
-        atomic_fetch_add(&delta, -change);
+    if (change != 0) {
+        accumulated += change;
+        if (curr == 0b11) {
+            int dir = (accumulated > 0) ? -1 : (accumulated < 0) ? 1 : 0;
+            if (dir != 0) {
+                // Scale step by how fast the knob is turning.
+                // Fast = small gap between detents → bigger step.
+                uint32_t now     = get_ccount();
+                uint32_t elapsed = now - last_detent_cycles;  // wraps safely
+                int step;
+                if      (elapsed < 2  * CYCLES_PER_MS) step = 8;
+                else if (elapsed < 5  * CYCLES_PER_MS) step = 4;
+                else if (elapsed < 15 * CYCLES_PER_MS) step = 2;
+                else                                    step = 1;
+                atomic_fetch_add(&delta, dir * step);
+                last_detent_cycles = now;
+            }
+            accumulated = 0;
+        }
+    }
 
     last_state = curr;
 }
@@ -34,6 +63,8 @@ static void IRAM_ATTR encoder_isr(void *arg)
 void encoder_init(void)
 {
     atomic_init(&delta, 0);
+    accumulated = 0;
+    last_detent_cycles = 0;
 
     gpio_config_t io = {
         .pin_bit_mask = (1ULL << PIN_CLK) | (1ULL << PIN_DT) | (1ULL << PIN_SW),
