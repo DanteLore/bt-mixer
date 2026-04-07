@@ -4,7 +4,93 @@
 
 ---
 
-## Attached Peripherals
+## Board Roles
+
+| Role | Board | Project folder |
+|------|-------|---------------|
+| **Master** | diymore ESP32-WROOM-32 with 1.9" LCD | `master/` |
+| **Channel** | AITRIP 30-pin CP2102 ESP32-WROOM-32 (no display) | `channel/` |
+
+The master board receives audio from N channel boards via I2S/I2C, mixes it, and forwards to a Bluetooth speaker via A2DP source. Each channel board receives audio via Bluetooth A2DP sink, applies its own volume (rotary encoder), and sends PCM frames to the master.
+
+---
+
+## Channel Board — AITRIP 30-pin CP2102 ESP32-WROOM-32
+
+Standard ESP32-WROOM-32 module on a minimal 30-pin devkit. No display. USB-C. CP2102 USB-serial chip.
+
+| Parameter | Value |
+|-----------|-------|
+| Module | ESP32-WROOM-32 |
+| USB Interface | Type-C |
+| USB-Serial Chip | CP2102 |
+| Working Voltage | 3.3V / USB 5V |
+| Flash | 4MB |
+| WiFi | 2.4GHz 802.11 b/g/n |
+| Bluetooth | 4.2 BR/EDR + BLE |
+
+### Pinout — 30-pin devkit (standard layout)
+
+#### Left side (top to bottom)
+
+| Pin | GPIO | Notes |
+|-----|------|-------|
+| 3V3 | — | 3.3V out |
+| EN | — | Reset |
+| VP | GPIO36 | Input only |
+| VN | GPIO39 | Input only |
+| D34 | GPIO34 | Input only |
+| D35 | GPIO35 | Input only |
+| D32 | GPIO32 | ADC1 |
+| D33 | GPIO33 | ADC1 |
+| D25 | GPIO25 | DAC1 |
+| D26 | GPIO26 | DAC2 |
+| D27 | GPIO27 | |
+| D14 | GPIO14 | Strapping — boot |
+| D12 | GPIO12 | Strapping — flash voltage, avoid |
+| GND | — | |
+| D13 | GPIO13 | |
+
+#### Right side (top to bottom)
+
+| Pin | GPIO | Notes |
+|-----|------|-------|
+| VIN | — | 5V in |
+| GND | — | |
+| D15 | GPIO15 | Strapping |
+| D2 | GPIO2 | Strapping, ADC2 |
+| D4 | GPIO4 | ADC2 |
+| RX2 | GPIO16 | UART2 RX |
+| TX2 | GPIO17 | UART2 TX |
+| D5 | GPIO5 | Strapping, SPI CS |
+| D18 | GPIO18 | SPI SCK |
+| D19 | GPIO19 | SPI MISO |
+| D21 | GPIO21 | I2C SDA |
+| RX0 | GPIO3 | UART0 RX |
+| TX0 | GPIO1 | UART0 TX |
+| D22 | GPIO22 | I2C SCL |
+| D23 | GPIO23 | SPI MOSI |
+
+### Planned channel board wiring
+
+| KY-040 Pin | GPIO | Notes |
+|-----------|------|-------|
+| CLK | GPIO33 | Encoder A |
+| DT | GPIO32 | Encoder B |
+| SW | GPIO27 | Push button |
+| VCC | 3.3V | |
+| GND | GND | |
+
+I2C to master (shared bus, each channel board is a slave at a unique address):
+
+| Signal | GPIO |
+|--------|------|
+| SDA | GPIO21 |
+| SCL | GPIO22 |
+
+---
+
+## Attached Peripherals — Master board only
 
 ### RUNCCI-YUN KY-040 Rotary Encoder
 
