@@ -1,101 +1,112 @@
-# bt-mixer — Project Context for Claude
+# bt-mixer — Project Context
 
 ## What this project is
 
 A multi-channel Bluetooth audio mixer built on ESP32 hardware. The system consists of:
 
-- **One master board** — receives audio from N channel boards, mixes it, and streams to a Bluetooth speaker via A2DP source
-- **N channel boards** — each receives audio via Bluetooth A2DP sink, applies per-channel volume, and sends PCM to the master
+- **One master board** — receives audio from N channel boards via SPI, mixes it, and streams to a Bluetooth speaker via A2DP source
+- **N channel boards** — each receives audio via Bluetooth A2DP sink, applies per-channel volume controlled by a rotary encoder, and sends PCM to the master over SPI
 
 ## Repository layout
 
 ```
 bt-mixer/
-├── master/          ← firmware for the master board (diymore ESP32 + LCD)
+├── master/              ← firmware for the master board (diymore ESP32 + LCD)
+│   ├── CMakeLists.txt
+│   ├── flash.ps1
+│   ├── sdkconfig.defaults
 │   └── main/
-├── channel/         ← firmware for channel boards (AITRIP 30-pin ESP32)
+│       ├── main.c       ← display mode / scan mode state machine
+│       ├── bt_audio.c/h ← A2DP source, test tone, gain ramping
+│       ├── encoder.c/h  ← quadrature ISR, acceleration
+│       ├── scan_mode.c/h← BT device discovery UI
+│       ├── st7789.c/h   ← LCD driver
+│       └── font8x8_basic.h
+├── channel/             ← firmware for channel boards (AITRIP 30-pin ESP32)
+│   ├── CMakeLists.txt
+│   ├── flash.ps1
+│   ├── sdkconfig.defaults
 │   └── main/
-├── HARDWARE.md      ← pinouts and wiring for all boards
-├── CLAUDE.md        ← this file
-└── flash.ps1        ← build/flash wrapper (ESP-IDF v5.5.3)
+│       ├── main.c       ← encoder loop, NVS volume, SPI slave (TODO)
+│       ├── bt_audio.c/h ← A2DP sink, volume, level meter
+│       └── encoder.c/h  ← same quadrature logic as master
+├── HARDWARE.md          ← pinouts and wiring for all boards
+├── README.md            ← this file
+└── .gitignore
 ```
-
-> **Note:** The repo is currently flat (all master code in `main/`). Restructuring into `master/` and `channel/` subdirectories is the next planned step.
 
 ## Hardware
 
-See HARDWARE.md for full details.
+See HARDWARE.md for full pinouts.
 
-**Master board:** diymore ESP32-WROOM-32 with integrated 1.9" ST7789V2 LCD (170×320, landscape). LCD is wired internally — GPIO2 (DC), GPIO4 (RST), GPIO15 (CS), GPIO18 (SCLK), GPIO23 (MOSI), GPIO32 (BL). Rotary encoder on GPIO33 (CLK), GPIO27 (DT), GPIO14 (SW).
+**Master board:** diymore ESP32-WROOM-32 with integrated 1.9" ST7789V2 LCD (170×320, landscape).
+- LCD internal wiring: GPIO2 (DC), GPIO4 (RST), GPIO15 (CS), GPIO18 (SCLK), GPIO23 (MOSI), GPIO32 (BL)
+- Rotary encoder: GPIO33 (CLK), GPIO27 (DT), GPIO14 (SW)
 
-**Channel board:** AITRIP 30-pin CP2102 ESP32-WROOM-32. No display. I2C to master on GPIO21 (SDA) / GPIO22 (SCL). Rotary encoder on GPIO33/32/27.
+**Channel board:** AITRIP 30-pin CP2102 ESP32-WROOM-32. No display.
+- SPI to master: GPIO5 (CS), GPIO18 (SCLK), GPIO19 (MISO), GPIO23 (MOSI)
+- Rotary encoder: GPIO33 (CLK), GPIO32 (DT), GPIO27 (SW)
 
 ## Toolchain
 
 - **ESP-IDF:** v5.5.3
 - **IDF_PATH:** `C:\esp\v5.5.3\esp-idf`
 - **Tools:** `C:\Espressif\tools`
-- **Build:** `.\flash.ps1 build` / `.\flash.ps1 -p COM3 build flash monitor`
+- **Build from project subdirectory:** `cd master` then `.\flash.ps1 build`
 - Language: **C only, not Arduino**
 
 ## Key architectural decisions
 
 ### Bluedroid A2DP sink + source are mutually exclusive
-The ESP32 Bluedroid stack cannot run A2DP sink and source at the same time. This is why the master board is source-only (sends to speaker) and the channel boards are sink-only (receive from phone/device). Audio is transferred between boards over I2C, not Bluetooth.
+The ESP32 Bluedroid stack cannot run A2DP sink and source simultaneously. Master = source only (→ speaker). Channel = sink only (← phone/device). Audio travels between boards over SPI as raw PCM.
 
-### Volume control
-- Per-channel volume: controlled by the rotary encoder on each channel board, applied to PCM samples before sending to master
-- Master output volume: controlled by the rotary encoder on the master board, applied before A2DP transmission
-- Both use a logarithmic dB curve: `dB = -40 + v * 0.468`, mapping 0–100 to -40dB–+6.8dB
-- Gain ramping: `GAIN_STEP = 10` per sample at 44100Hz (~5ms), prevents pops on fast changes
+### Volume control — both boards
+- Logarithmic dB curve: `dB = -40 + v * 0.468`, mapping 0–100 to -40dB–+6.8dB
+- Gain ramping: `GAIN_STEP = 10` per sample at 44100Hz (~5ms ramp), prevents pops
 - Volume persisted to NVS; saved 2 seconds after knob stops (flash wear protection)
 
-### Encoder
-- ANYEDGE interrupts on both CLK and DT
-- Quadrature state machine with lookup table — invalid transitions (bounce) return 0
-- Accumulates transitions within each detent, emits one step only when encoder returns to rest state (0b11) — eliminates ×4 counting
-- Acceleration: step size 1/2/4/8 based on CPU cycle timer between detents
-- ~5ms / 15ms / ... thresholds — tweak in encoder.c if too sensitive
+### Encoder — both boards
+- ANYEDGE interrupts on both CLK and DT pins
+- Quadrature state machine lookup table — invalid transitions (bounce) silently ignored
+- Accumulates within each detent, emits one step only on return to rest (0b11)
+- Acceleration: step size 1/2/4/8 based on CPU cycle counter between detents
 
-### Display (master only)
-- ST7789V2, landscape, 320×170 px, RGB565
-- Differential bar drawing — only the changed slice is repainted, prevents flicker
-- 20Hz draw rate, gated on value changes
-- VOL label + conn state on row 1 (y=8); SIG bar at y=48/64; font is 8×8px
+### Display — master only
+- ST7789V2, landscape 320×170 px, RGB565, 8×8px bitmap font
+- Differential bar drawing — only changed slice repainted, no flicker
+- 20Hz draw rate; VOL label + conn state on row 1; SIG meter below
 
-### Bluetooth (master)
-- Device name: `bt-mixer`
-- PIN: `0000` (legacy pairing, no SSP)
-- Scan mode: entered by pressing encoder button
-  - CoD filter: Audio/Video major class only (0x04) — filters out PCs etc.
-  - Rescan every 15s automatically
-  - `<< BACK` as last row; scroll with encoder, select with button press
-- BDA and device name persisted to NVS; auto-connects on boot
-- Auto-reconnect: retries every 7s when disconnected
-- Pending connect: if already connected when a new connect is requested, suspends + disconnects cleanly first, then connects in the DISCONNECTED callback
+### Bluetooth — master
+- Device name: `bt-mixer`, PIN: `0000` (legacy pairing)
+- Scan mode: CoD filter (Audio/Video major class 0x04 only — filters PCs etc.)
+- Rescan every 15s; `<< BACK` at bottom of list
+- BDA + device name persisted to NVS; auto-connects on boot
+- Auto-reconnect every 7s when disconnected
+- Pending connect: defers `source_connect` until `DISCONNECTED` callback (avoids stack errors)
 
-### Audio (master, current)
-- Test tone: 440Hz sine wave generated in `source_data_cb`
-- When channel boards are integrated: mix N × PCM streams from I2C, replace sine generator
-- Level meter: peak of post-gain samples, mapped to dBFS (-40dBFS → 0%, 0dBFS → 100%), fast attack / slow decay (7/8 decay per callback)
+### Bluetooth — channel
+- Device name: `bt-mixer-ch1`, `bt-mixer-ch2` etc. (set via `CHANNEL_ID` in main.c)
+- PIN: `0000`
+- Discoverable and connectable; phone/device connects to it like a BT speaker
 
-### I2C protocol (planned — channel → master)
-- Master polls each channel board at a fixed interval
-- Each channel board responds with a fixed-size PCM frame + current volume
-- I2C addresses: one per channel, configured at compile time or via hardware strapping
-- Not yet implemented
+### Audio — master (current)
+- Test tone: 440Hz sine wave in `source_data_cb` — to be replaced with SPI mix
+- Level meter: peak of post-gain samples → dBFS → 0–100 bar
+
+### SPI — channel → master (TODO)
+- Master polls each channel board in turn using a dedicated CS pin per board
+- Channel SPI slave pre-fills a DMA buffer each A2DP callback; master reads it on demand
+- Each transaction carries a small header (volume, conn state) followed by a PCM frame
+- One shared bus (SPI3_HOST on master): SCLK, MOSI, MISO + one CS pin per channel
+- Channel board uses SPI slave driver with DMA; master uses SPI master driver
+- Not yet implemented — stub in channel/main/main.c
 
 ## What to work on next
 
-1. Restructure repo into `master/` and `channel/` directories with separate CMakeLists
-2. Implement channel board firmware:
-   - A2DP sink (receive from phone)
-   - Rotary encoder volume control
-   - I2C slave: respond to master poll with PCM frame
-3. Update master firmware:
-   - I2C master: poll N channel boards
-   - Replace sine wave with mixed PCM from channel boards
-   - Display channel count / per-channel levels (future)
+1. Implement SPI slave on channel boards (respond to master poll with PCM frame + volume)
+2. Implement SPI master on master board (poll N channels, mix PCM)
+3. Replace master sine wave with mixed channel audio
+4. Consider display extensions: per-channel level bars on master LCD
 
 ## Coding style
 

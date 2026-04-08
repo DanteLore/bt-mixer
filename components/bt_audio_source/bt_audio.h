@@ -11,9 +11,11 @@ typedef enum {
 
 void bt_audio_init(void);
 void bt_audio_set_volume(int volume);  // 0-100
-void bt_audio_connect(uint8_t *bda);   // connect to BT speaker by address
+
+// Source only — connect to a BT speaker by address
+void bt_audio_connect(uint8_t *bda);
 
 bt_conn_state_t bt_audio_get_state(void);
 
-// Returns current signal level 0-100, with fast attack and slow decay.
+// Returns current signal level 0-100, fast attack / slow decay.
 int bt_audio_get_level(void);

@@ -53,7 +53,7 @@ void app_main(void)
 
     int volume = load_volume();
 
-    encoder_init();
+    encoder_init(33, 32, 27);  // CLK, DT, SW
 
     char device_name[16];
     snprintf(device_name, sizeof(device_name), "bt-mixer-ch%d", CHANNEL_ID);

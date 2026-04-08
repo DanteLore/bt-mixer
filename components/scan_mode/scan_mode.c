@@ -1,5 +1,4 @@
 #include "scan_mode.h"
-#include "bt_audio.h"
 #include "st7789.h"
 
 #include "esp_gap_bt_api.h"

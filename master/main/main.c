@@ -223,7 +223,7 @@ void app_main(void)
     st7789_init();
     st7789_fill(COLOR_BLACK);
 
-    encoder_init();
+    encoder_init(33, 27, 14);  // CLK, DT, SW
     bt_audio_init();
     bt_audio_set_volume(volume);
     scan_mode_init();

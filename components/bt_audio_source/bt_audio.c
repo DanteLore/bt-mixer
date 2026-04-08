@@ -16,37 +16,51 @@
 static const char *TAG = "bt_audio";
 
 static atomic_int gain_fp;          // target gain, fixed-point: 1000 = 1.0x
-static int        current_gain_fp;  // ramped toward target each callback
+static int        current_gain_fp;  // actual applied gain, ramped toward target
+static atomic_int conn_state;        // bt_conn_state_t
+static uint8_t    pending_bda[6];
+static int        pending_connect = 0;
 static atomic_int audio_level;
-static atomic_int conn_state;
 
-#define GAIN_STEP 10
+// ---- Test tone generator ------------------------------------------------
 
-// ---- A2DP sink data callback --------------------------------------------
-// Receives decoded PCM from the connected source device.
-// Applies volume, measures level, and forwards to SPI master (TODO).
+#define SAMPLE_RATE   44100
+#define TONE_HZ       440
+#define TWO_PI        6.28318530718f
 
-static void data_cb(const uint8_t *buf, uint32_t len)
+static float tone_phase = 0.0f;
+static const float tone_phase_inc = TWO_PI * TONE_HZ / SAMPLE_RATE;
+
+// Called by the A2DP stack to pull PCM data. Stereo 16-bit signed @ 44100Hz.
+static int32_t source_data_cb(uint8_t *buf, int32_t len)
 {
-    const int16_t *samples = (const int16_t *)buf;
-    int n      = len / 2;
-    int target = atomic_load(&gain_fp);
+    int16_t *out = (int16_t *)buf;
+    int frames   = len / 4;  // 2 channels × 2 bytes
+    int target   = atomic_load(&gain_fp);
+
+    // Ramp ~5ms at 44100Hz = ~220 samples; step size ≈ 10
+    #define GAIN_STEP 10
 
     int32_t peak = 0;
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < frames; i++) {
         if      (current_gain_fp < target - GAIN_STEP) current_gain_fp += GAIN_STEP;
         else if (current_gain_fp > target + GAIN_STEP) current_gain_fp -= GAIN_STEP;
         else                                            current_gain_fp  = target;
+        int32_t sample = (int32_t)(sinf(tone_phase) * 32767.0f);
+        tone_phase += tone_phase_inc;
+        if (tone_phase >= TWO_PI) tone_phase -= TWO_PI;
 
-        int32_t s = (int32_t)samples[i] * current_gain_fp / 1000;
+        int32_t s = sample * current_gain_fp / 1000;
         if (s >  32767) s =  32767;
         if (s < -32767) s = -32767;
-        if (s < 0) s = -s;
+        if (s < 0 && -s > peak) peak = -s;
         if (s > peak) peak = s;
 
-        // TODO: buffer volume-adjusted samples for SPI master to poll
+        out[i * 2]     = (int16_t)s;  // L
+        out[i * 2 + 1] = (int16_t)s;  // R
     }
 
+    // Update level meter (dBFS, fast attack / slow decay)
     int new_level;
     if (peak == 0) {
         new_level = 0;
@@ -59,9 +73,11 @@ static void data_cb(const uint8_t *buf, uint32_t len)
     int current  = atomic_load(&audio_level);
     int smoothed = (new_level > current) ? new_level : (current * 7 + new_level) / 8;
     atomic_store(&audio_level, smoothed);
+
+    return len;
 }
 
-// ---- Callbacks ----------------------------------------------------------
+// ---- A2DP / GAP callbacks -----------------------------------------------
 
 static void a2d_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param)
 {
@@ -73,12 +89,18 @@ static void a2d_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param)
             break;
         case ESP_A2D_CONNECTION_STATE_CONNECTED:
             atomic_store(&conn_state, BT_STATE_CONNECTED);
-            ESP_LOGI(TAG, "connected");
+            esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY);
             break;
         case ESP_A2D_CONNECTION_STATE_DISCONNECTING:
+            atomic_store(&conn_state, BT_STATE_DISCONNECTED);
+            break;
         case ESP_A2D_CONNECTION_STATE_DISCONNECTED:
             atomic_store(&conn_state, BT_STATE_DISCONNECTED);
-            ESP_LOGI(TAG, "disconnected");
+            if (pending_connect) {
+                pending_connect = 0;
+                atomic_store(&conn_state, BT_STATE_CONNECTING);
+                esp_a2d_source_connect(pending_bda);
+            }
             break;
         default:
             break;
@@ -87,6 +109,11 @@ static void a2d_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param)
     case ESP_A2D_AUDIO_STATE_EVT:
         ESP_LOGI(TAG, "audio %s", param->audio_stat.state == ESP_A2D_AUDIO_STATE_STARTED
                                    ? "started" : "stopped");
+        break;
+    case ESP_A2D_MEDIA_CTRL_ACK_EVT:
+        if (param->media_ctrl_stat.cmd == ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY
+                && param->media_ctrl_stat.status == ESP_A2D_MEDIA_CTRL_ACK_SUCCESS)
+            esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
         break;
     default:
         break;
@@ -107,6 +134,7 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
 
 void bt_audio_set_volume(int v)
 {
+    // Map 0-100 → -40dB to +6.8dB logarithmically
     float gain;
     if (v == 0) {
         gain = 0.0f;
@@ -140,11 +168,26 @@ void bt_audio_init(void)
 
     ESP_ERROR_CHECK(esp_bt_gap_register_callback(gap_cb));
     ESP_ERROR_CHECK(esp_a2d_register_callback(a2d_cb));
-    ESP_ERROR_CHECK(esp_a2d_sink_init());
-    ESP_ERROR_CHECK(esp_a2d_sink_register_data_callback(data_cb));
+    ESP_ERROR_CHECK(esp_a2d_source_init());
+    ESP_ERROR_CHECK(esp_a2d_source_register_data_callback(source_data_cb));
 
-    // Device name will be set per-channel in app_main (e.g. "ch-1", "ch-2")
-    esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
+    esp_bt_gap_set_device_name("bt-mixer");
+}
+
+void bt_audio_connect(uint8_t *bda)
+{
+    bt_conn_state_t current = (bt_conn_state_t)atomic_load(&conn_state);
+    if (current == BT_STATE_CONNECTING) return;
+    if (current == BT_STATE_CONNECTED) {
+        // Store target and wait for disconnect callback before connecting
+        memcpy(pending_bda, bda, 6);
+        pending_connect = 1;
+        esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_SUSPEND);
+        esp_a2d_source_disconnect(bda);
+        return;
+    }
+    atomic_store(&conn_state, BT_STATE_CONNECTING);
+    esp_a2d_source_connect(bda);
 }
 
 bt_conn_state_t bt_audio_get_state(void)

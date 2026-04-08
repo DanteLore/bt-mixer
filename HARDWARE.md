@@ -11,7 +11,7 @@
 | **Master** | diymore ESP32-WROOM-32 with 1.9" LCD | `master/` |
 | **Channel** | AITRIP 30-pin CP2102 ESP32-WROOM-32 (no display) | `channel/` |
 
-The master board receives audio from N channel boards via I2S/I2C, mixes it, and forwards to a Bluetooth speaker via A2DP source. Each channel board receives audio via Bluetooth A2DP sink, applies its own volume (rotary encoder), and sends PCM frames to the master.
+The master board receives audio from N channel boards via SPI, mixes it, and forwards to a Bluetooth speaker via A2DP source. Each channel board receives audio via Bluetooth A2DP sink, applies its own volume (rotary encoder), and sends PCM frames to the master.
 
 ---
 
@@ -65,10 +65,10 @@ Standard ESP32-WROOM-32 module on a minimal 30-pin devkit. No display. USB-C. CP
 | D5 | GPIO5 | Strapping, SPI CS |
 | D18 | GPIO18 | SPI SCK |
 | D19 | GPIO19 | SPI MISO |
-| D21 | GPIO21 | I2C SDA |
+| D21 | GPIO21 | |
 | RX0 | GPIO3 | UART0 RX |
 | TX0 | GPIO1 | UART0 TX |
-| D22 | GPIO22 | I2C SCL |
+| D22 | GPIO22 | |
 | D23 | GPIO23 | SPI MOSI |
 
 ### Planned channel board wiring
@@ -81,12 +81,14 @@ Standard ESP32-WROOM-32 module on a minimal 30-pin devkit. No display. USB-C. CP
 | VCC | 3.3V | |
 | GND | GND | |
 
-I2C to master (shared bus, each channel board is a slave at a unique address):
+SPI to master (shared bus, dedicated CS pin per channel board):
 
-| Signal | GPIO |
-|--------|------|
-| SDA | GPIO21 |
-| SCL | GPIO22 |
+| Signal | GPIO | Notes |
+|--------|------|-------|
+| SCLK | GPIO18 | Shared across all channel boards |
+| MOSI | GPIO23 | Master → channel (commands) |
+| MISO | GPIO19 | Channel → master (PCM + header) |
+| CS | GPIO5 | Driven by master; one CS pin per channel |
 
 ---
 
@@ -262,8 +264,8 @@ ledc_channel_config(&ch);
 | GPIO | Notes |
 |------|-------|
 | GPIO13 | General purpose |
-| GPIO21 | Default I2C SDA — free, broken out on header |
-| GPIO22 | Default I2C SCL — free, broken out on header |
+| GPIO21 | Free, broken out on header |
+| GPIO22 | Free, broken out on header |
 | GPIO25 | Also DAC1 |
 | GPIO26 | Also DAC2 |
 | GPIO34, 35, 36, 39 | **Input only** — no pull-up/down, no output |

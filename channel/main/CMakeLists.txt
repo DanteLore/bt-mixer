@@ -1,7 +1,5 @@
 idf_component_register(
-    SRCS "main.c" "encoder.c" "bt_audio.c"
+    SRCS "main.c"
     INCLUDE_DIRS "."
-    REQUIRES nvs_flash esp_driver_gpio esp_timer bt
+    REQUIRES nvs_flash esp_timer bt_audio_sink encoder
 )
-
-target_link_libraries(${COMPONENT_LIB} PRIVATE m)
