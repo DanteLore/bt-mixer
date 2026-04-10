@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 set(EXTRA_COMPONENT_DIRS "../components")
-set(COMPONENTS main bt_audio_sink encoder)
+set(COMPONENTS main bt_audio_sink encoder spi_audio uart_audio_slave)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(bt-mixer-channel)

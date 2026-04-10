@@ -9,6 +9,7 @@
 #include "encoder.h"
 #include "bt_audio.h"
 #include "scan_mode.h"
+#include "uart_audio_master.h"
 
 // Bar geometry (landscape 320x170)
 #define BAR_X   20
@@ -226,6 +227,8 @@ void app_main(void)
     encoder_init(33, 27, 14);  // CLK, DT, SW
     bt_audio_init();
     bt_audio_set_volume(volume);
+    uart_audio_master_init(1);
+    bt_audio_set_source(uart_audio_master_get_samples);
     scan_mode_init();
 
     // Restore last known speaker name and auto-connect

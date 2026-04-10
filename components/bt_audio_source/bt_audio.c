@@ -22,45 +22,66 @@ static uint8_t    pending_bda[6];
 static int        pending_connect = 0;
 static atomic_int audio_level;
 
-// ---- Test tone generator ------------------------------------------------
+// ---- Audio source -------------------------------------------------------
 
+static bt_audio_source_cb_t source_cb = NULL;
+
+void bt_audio_set_source(bt_audio_source_cb_t cb)
+{
+    source_cb = cb;
+}
+
+// Test tone fallback — used when no source callback is registered.
 #define SAMPLE_RATE   44100
 #define TONE_HZ       440
 #define TWO_PI        6.28318530718f
-
 static float tone_phase = 0.0f;
 static const float tone_phase_inc = TWO_PI * TONE_HZ / SAMPLE_RATE;
+
+#define GAIN_STEP 10
 
 // Called by the A2DP stack to pull PCM data. Stereo 16-bit signed @ 44100Hz.
 static int32_t source_data_cb(uint8_t *buf, int32_t len)
 {
-    int16_t *out = (int16_t *)buf;
-    int frames   = len / 4;  // 2 channels × 2 bytes
-    int target   = atomic_load(&gain_fp);
+    int16_t *out    = (int16_t *)buf;
+    int      frames = len / 4;  // stereo 16-bit
+    int      target = atomic_load(&gain_fp);
 
-    // Ramp ~5ms at 44100Hz = ~220 samples; step size ≈ 10
-    #define GAIN_STEP 10
+    // Fill buffer from source callback or test tone
+    if (source_cb) {
+        source_cb(out, frames);
+    } else {
+        for (int i = 0; i < frames; i++) {
+            int32_t s = (int32_t)(sinf(tone_phase) * 32767.0f);
+            tone_phase += tone_phase_inc;
+            if (tone_phase >= TWO_PI) tone_phase -= TWO_PI;
+            out[i * 2]     = (int16_t)s;
+            out[i * 2 + 1] = (int16_t)s;
+        }
+    }
 
+    // Apply master output gain and measure level
     int32_t peak = 0;
     for (int i = 0; i < frames; i++) {
         if      (current_gain_fp < target - GAIN_STEP) current_gain_fp += GAIN_STEP;
         else if (current_gain_fp > target + GAIN_STEP) current_gain_fp -= GAIN_STEP;
         else                                            current_gain_fp  = target;
-        int32_t sample = (int32_t)(sinf(tone_phase) * 32767.0f);
-        tone_phase += tone_phase_inc;
-        if (tone_phase >= TWO_PI) tone_phase -= TWO_PI;
 
-        int32_t s = sample * current_gain_fp / 1000;
-        if (s >  32767) s =  32767;
-        if (s < -32767) s = -32767;
-        if (s < 0 && -s > peak) peak = -s;
-        if (s > peak) peak = s;
+        int32_t l = (int32_t)out[i * 2]     * current_gain_fp / 1000;
+        int32_t r = (int32_t)out[i * 2 + 1] * current_gain_fp / 1000;
+        if (l >  32767) l =  32767;
+        if (l < -32767) l = -32767;
+        if (r >  32767) r =  32767;
+        if (r < -32767) r = -32767;
+        out[i * 2]     = (int16_t)l;
+        out[i * 2 + 1] = (int16_t)r;
 
-        out[i * 2]     = (int16_t)s;  // L
-        out[i * 2 + 1] = (int16_t)s;  // R
+        int32_t abs_l = l < 0 ? -l : l;
+        int32_t abs_r = r < 0 ? -r : r;
+        int32_t p = abs_l > abs_r ? abs_l : abs_r;
+        if (p > peak) peak = p;
     }
 
-    // Update level meter (dBFS, fast attack / slow decay)
     int new_level;
     if (peak == 0) {
         new_level = 0;

@@ -97,8 +97,9 @@ The ESP32 Bluedroid stack cannot run A2DP sink and source simultaneously. Master
 - Master polls each channel board in turn using a dedicated CS pin per board
 - Channel SPI slave pre-fills a DMA buffer each A2DP callback; master reads it on demand
 - Each transaction carries a small header (volume, conn state) followed by a PCM frame
-- One shared bus (SPI3_HOST on master): SCLK, MOSI, MISO + one CS pin per channel
-- Channel board uses SPI slave driver with DMA; master uses SPI master driver
+- Master uses SPI3_HOST on GPIO21 (SCLK), GPIO22 (MOSI), GPIO19 (MISO)
+- CS pins on master: GPIO25 (ch1), GPIO26 (ch2), GPIO13 (ch3)
+- Channel uses SPI2_HOST on GPIO18 (SCLK), GPIO23 (MOSI), GPIO19 (MISO), GPIO5 (CS)
 - Not yet implemented — stub in channel/main/main.c
 
 ## What to work on next

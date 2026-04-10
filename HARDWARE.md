@@ -11,7 +11,7 @@
 | **Master** | diymore ESP32-WROOM-32 with 1.9" LCD | `master/` |
 | **Channel** | AITRIP 30-pin CP2102 ESP32-WROOM-32 (no display) | `channel/` |
 
-The master board receives audio from N channel boards via SPI, mixes it, and forwards to a Bluetooth speaker via A2DP source. Each channel board receives audio via Bluetooth A2DP sink, applies its own volume (rotary encoder), and sends PCM frames to the master.
+The master board receives audio from N channel boards via UART, mixes it, and forwards to a Bluetooth speaker via A2DP source. Each channel board receives audio via Bluetooth A2DP sink, applies its own volume (rotary encoder), and sends PCM frames to the master.
 
 ---
 
@@ -81,14 +81,19 @@ Standard ESP32-WROOM-32 module on a minimal 30-pin devkit. No display. USB-C. CP
 | VCC | 3.3V | |
 | GND | GND | |
 
-SPI to master (shared bus, dedicated CS pin per channel board):
+UART to master (one dedicated UART per channel board, with hardware RTS/CTS flow control):
 
-| Signal | GPIO | Notes |
-|--------|------|-------|
-| SCLK | GPIO18 | Shared across all channel boards |
-| MOSI | GPIO23 | Master → channel (commands) |
-| MISO | GPIO19 | Channel → master (PCM + header) |
-| CS | GPIO5 | Driven by master; one CS pin per channel |
+| Signal | Channel GPIO | Master GPIO | Notes |
+|--------|-------------|------------|-------|
+| TX | GPIO17 | GPIO16 | Channel → master (COBS-framed PCM) |
+| RTS/CTS | GPIO4 | GPIO25 | Master RTS → channel CTS; master de-asserts when RX FIFO is nearly full |
+| GND | GND | GND | Common ground required |
+
+> **Flow control note:** the master uses `UART_HW_FLOWCTRL_RTS` with `rx_flow_ctrl_thresh=120` (FIFO depth is 128). This threshold keeps ~94% bandwidth utilisation. A lower threshold (e.g. 64) causes the master to hold RTS active for too long, stalling the channel's `uart_write_bytes` and filling the TX queue.
+>
+> The channel TX task runs on core 1 (not core 0 where the BT stack runs). Moving it to core 0 starves the BT IDLE task and triggers the interrupt watchdog.
+>
+> The BT audio callback (`on_frame_ready`) enqueues frames non-blocking and must never call `uart_write_bytes` directly — doing so would block the BT task during CTS holdoffs and cause A2DP SBC packet drops.
 
 ---
 
@@ -264,9 +269,9 @@ ledc_channel_config(&ch);
 | GPIO | Notes |
 |------|-------|
 | GPIO13 | General purpose |
+| GPIO19 | Free, broken out on header |
 | GPIO21 | Free, broken out on header |
 | GPIO22 | Free, broken out on header |
-| GPIO25 | Also DAC1 |
 | GPIO26 | Also DAC2 |
 | GPIO34, 35, 36, 39 | **Input only** — no pull-up/down, no output |
 
@@ -277,6 +282,8 @@ ledc_channel_config(&ch);
 | GPIO14 | KY-040 rotary encoder | SW (push button) |
 | GPIO27 | KY-040 rotary encoder | DT (encoder B) |
 | GPIO33 | KY-040 rotary encoder | CLK (encoder A) |
+| GPIO16 | UART2 inter-board | RX (channel 1 TX) |
+| GPIO25 | UART2 inter-board | RTS → channel 1 CTS (flow control) |
 
 ### Strapping pins — handle with care
 
